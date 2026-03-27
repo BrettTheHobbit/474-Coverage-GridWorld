@@ -28,7 +28,7 @@ def observation(grid: np.ndarray):
     return grid.flatten()
 
 
-def reward(info: dict) -> float:
+def reward(info: dict, reward_func: int) -> float:
     """
     Function to calculate the reward for the current step based on the state information.
 
@@ -45,6 +45,11 @@ def reward(info: dict) -> float:
     - steps_remaining (int): steps remaining in the episode.
     - new_cell_covered (bool): if a cell previously uncovered was covered on this step
     - game_over (bool) : if the game was terminated because the player was seen by an enemy or not
+    
+    reward_func - 1 2 or 3 and determines which reward calculation is used
+        1 - A balanced reward that takes into account most information equally
+        2 - A conservative function, prioritizing safety above all else
+        3 - A greedier function, prioritizing covering as many cells as possible without endangering itself
     """
     enemies = info["enemies"]
     agent_pos = info["agent_pos"]
@@ -58,4 +63,26 @@ def reward(info: dict) -> float:
     # IMPORTANT: You may design a reward function that uses just some of these values. Experiment with different
     # rewards and find out what works best for the algorithm you chose given the observation space you are using
 
-    return 0
+    final_reward = 0
+
+    if reward_func == 1:
+        if new_cell_covered:
+            final_reward += 1
+
+        final_reward = (total_covered_cells/coverable_cells) - (cells_remaining/coverable_cells)
+    elif reward_func == 2:
+        if not game_over:
+            final_reward += 10*enemies
+
+        final_reward += cells_remaining
+    elif reward_func == 3:
+        if new_cell_covered: #rewards new discovery, increasing with even more enemies
+            final_reward += 1*enemies
+        
+        final_reward += (total_covered_cells - steps_remaining) + agent_pos
+    else:
+        raise ValueError("reward_func only accepts values 1 (balanced), 2 (safe) or 3 (greedy)")
+    
+    if game_over:
+        final_reward = -100
+    return final_reward
