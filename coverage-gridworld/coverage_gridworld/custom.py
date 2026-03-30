@@ -5,27 +5,122 @@ import gymnasium as gym
 Feel free to modify the functions below and experiment with different environment configurations.
 """
 
+#Choosing Observation Mode
+OBS_MODE = 2   # 1 = full grid  |  2 = compact feature vector
+ 
+# Color constants 
+_BLACK      = (0,   0,   0)    # unexplored cell
+_WHITE      = (255, 255, 255)  # explored cell
+_BROWN      = (101, 67,  33)   # wall
+_GREY       = (160, 161, 161)  # agent
+_GREEN      = (31,  198, 0)    # enemy
+_RED        = (255, 0,   0)    # unexplored cell under enemy FOV
+_LIGHT_RED  = (255, 127, 127)  # explored cell under enemy FOV
+ 
 
+#Helper function to get the type of the cell
+def cell_type(rgb: np.ndarray) -> int:
+    """Map an RGB triple to a compact integer cell-type label (0-6)."""
+    rgb = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+    mapping = {
+        _BLACK:     0,
+        _WHITE:     1,
+        _BROWN:     2,
+        _GREY:      3,
+        _GREEN:     4,
+        _RED:       5,
+        _LIGHT_RED: 6,
+    }
+    return mapping.get(rgb, 0)
+
+
+
+# OBSERVATION SPACE 1 — Full flattened grid 
+
+def obs_space_full(env: gym.Env) -> gym.spaces.Space:
+    """
+    Each of the 10×10 = 100 cells is encoded as a single integer in [0, 6]
+    representing the cell type (unexplored, explored, wall, agent, enemy,
+    danger-unexplored, danger-explored).  Total: 100-dim MultiDiscrete.
+    """
+    return gym.spaces.MultiDiscrete([7] * (env.grid_size * env.grid_size))
+ 
+ 
+def obs_full(grid: np.ndarray) -> np.ndarray:
+    """Return a flat integer array of shape (100,), one label per cell."""
+    rows, cols = grid.shape[:2]
+    out = np.zeros(rows * cols, dtype=np.int64)
+    for r in range(rows):
+        for c in range(cols):
+            out[r * cols + c] = cell_type(grid[r, c])
+    return out
+
+
+# OBSERVATION SPACE 2 — Compact feature vector (Box, 3 dims)
+def obs_space_compact(env: gym.Env) -> gym.spaces.Space:
+    """
+    A lightweight 3-dimensional Box observation, all values normalised to [0, 1]:
+      [0] agent_position  — flat grid index normalised by total cells (0 to 1)
+      [1] coverage_ratio  — how much of the map has been explored (0 to 1)
+      [2] danger_ratio    — fraction of cells currently under enemy FOV (0 to 1)
+    """
+    return gym.spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32)
+ 
+ 
+def obs_compact(grid: np.ndarray) -> np.ndarray:
+    """Return the 3-dim feature vector from the raw grid."""
+    rows, cols = grid.shape[:2]
+    n_cells = rows * cols
+ 
+    agent_pos_flat = 0
+    coverable      = 0
+    covered        = 0
+    danger_cells   = 0
+ 
+    for r in range(rows):
+        for c in range(cols):
+            ct = cell_type(grid[r, c])
+            if ct == 3:              # GREY = agent
+                agent_pos_flat = r * cols + c
+            if ct != 2:              # not a wall → coverable
+                coverable += 1
+            if ct in (1, 3, 6):     # WHITE, GREY, LIGHT_RED = already explored
+                covered += 1
+            if ct in (5, 6):         # RED, LIGHT_RED = under enemy FOV
+                danger_cells += 1
+ 
+    return np.array([
+        agent_pos_flat / n_cells,           # [0] normalised position
+        covered / max(coverable, 1),        # [1] coverage ratio
+        danger_cells / n_cells,             # [2] danger ratio
+    ], dtype=np.float32)
+
+
+# PUBLIC API  (called by env.py)
+ 
 def observation_space(env: gym.Env) -> gym.spaces.Space:
     """
-    Observation space from Gymnasium (https://gymnasium.farama.org/api/spaces/)
+    Returns the observation space based on OBS_MODE.
+ 
+    OBS_MODE 1 → MultiDiscrete([7]*100)  — full grid encoding
+    OBS_MODE 2 → Box(3,)                 — compact feature vector  ← default
     """
-    # The grid has (10, 10, 3) shape and can store values from 0 to 255 (uint8). To use the whole grid as the
-    # observation space, we can consider a MultiDiscrete space with values in the range [0, 256).
-    cell_values = env.grid + 256
-
-    # if MultiDiscrete is used, it's important to flatten() numpy arrays!
-    return gym.spaces.MultiDiscrete(cell_values.flatten())
-
-
-def observation(grid: np.ndarray):
+    if OBS_MODE == 1:
+        return obs_space_full(env)
+    else:
+        return obs_space_compact(env)
+ 
+ 
+def observation(grid: np.ndarray) -> np.ndarray:
     """
-    Function that returns the observation for the current state of the environment.
+    Returns the observation for the current grid state.
+    Must match the shape/dtype declared in observation_space().
     """
-    # If the observation returned is not the same shape as the observation_space, an error will occur!
-    # Make sure to make changes to both functions accordingly.
+    if OBS_MODE == 1:
+        return obs_full(grid)
+    else:
+        return obs_compact(grid)
 
-    return grid.flatten()
 
 
 def reward(info: dict, reward_func: int) -> float:
