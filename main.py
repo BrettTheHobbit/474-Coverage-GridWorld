@@ -2,6 +2,7 @@ import random
 import time
 import gymnasium
 import coverage_gridworld  # must be imported, even though it's not directly referenced
+from stable_baselines3 import PPO
 
 
 def human_player():
@@ -89,18 +90,27 @@ maps = [
     ]
 ]
 
-env = gymnasium.make("sneaky_enemies", render_mode="human", predefined_map_list=None, activate_game_status=True)
+#Train the Agent
+
+train_env = gymnasium.make("safe", render_mode=None, activate_game_status=False)
+model = PPO("MlpPolicy", train_env, verbose=1)
+model.learn(total_timesteps=500_000)
+model.save("ppo_coverage")
+train_env.close()
+print("Training done, model saved to ppo_coverage.zip")
+
+#Evaluate the Agent
+eval_env = gymnasium.make("sneaky_enemies", render_mode="human", activate_game_status=True)
 num_episodes = 5
 
 for i in range(num_episodes):
-    env.reset()
+    obs, info = eval_env.reset()
     done = False
     while not done:
-        action = human_player()
-        obs, reward, done, truncated, info = env.step(action)
-
-        # Sleep may be used to allow each step to be visualized. Value can be changed
-        #time.sleep(0.2)
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, truncated, info = eval_env.step(int(action))
+        time.sleep(0.2)
     if done:
         time.sleep(2)
-env.close()
+
+eval_env.close()
