@@ -164,7 +164,7 @@ def reward(info: dict, reward_func: int) -> float:
         if new_cell_covered:
             final_reward += 1
 
-        final_reward = (total_covered_cells/coverable_cells) - (cells_remaining/coverable_cells)
+        final_reward += (total_covered_cells/coverable_cells) 
     elif reward_func == 2:
         if not game_over:
             final_reward += 10*len(enemies)
@@ -179,5 +179,5 @@ def reward(info: dict, reward_func: int) -> float:
         raise ValueError("reward_func only accepts values 1 (balanced), 2 (safe) or 3 (greedy)")
     
     if game_over:
-        final_reward = -100
+        final_reward = -25
     return final_reward
