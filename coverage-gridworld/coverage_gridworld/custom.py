@@ -169,7 +169,7 @@ def reward(info: dict, reward_func: int) -> float:
         if not game_over:
             final_reward += 10*len(enemies)
 
-        final_reward += cells_remaining
+        final_reward += total_covered_cells
     elif reward_func == 3:
         if new_cell_covered: #rewards new discovery, increasing with even more enemies
             final_reward += 1*len(enemies)
