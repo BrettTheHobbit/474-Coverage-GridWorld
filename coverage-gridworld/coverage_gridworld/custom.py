@@ -6,84 +6,84 @@ from collections import deque
 Feel free to modify the functions below and experiment with different environment configurations.
 """
 
-#Choosing Observation Mode
-# 1 = full grid
-# 2 = compact (3 features)
-# 3 = local patch + global metrics
-# 4 = frontier/risk engineered features
-# 5 = local patch + explicit enemy FOV prediction (next / +2 rotations) + per-action lookahead
+# --- Mode switches (observation_space / observation and reward() dispatch) ---
+# OBS_MODE: 1 full grid, 2 compact (3-d), 3 local patch + globals, 4 frontier/risk, 5 mode 3 + predictive FOV
 OBS_MODE = 5
-
-# Choosing reward mode (used by reward(); same idea as OBS_MODE for observation_space / observation).
-# 1 = balanced, 2 = safety-prioritized, 3 = greedy, 4 = enhanced (BFS, FOV lookahead, anti-loop)
+# REWARD_MODE: 1 balanced, 2 safety-first, 3 greedy, 4 enhanced (BFS + FOV + anti-loop)
 REWARD_MODE = 4
 
-# Color constants 
-_BLACK      = (0,   0,   0)    # unexplored cell
-_WHITE      = (255, 255, 255)  # explored cell
-_BROWN      = (101, 67,  33)   # wall
-_GREY       = (160, 161, 161)  # agent
-_GREEN      = (31,  198, 0)    # enemy
-_RED        = (255, 0,   0)    # unexplored cell under enemy FOV
-_LIGHT_RED  = (255, 127, 127)  # explored cell under enemy FOV
- 
-# Anti-loop trackers for reward shaping (module-level across steps).
+# --- Grid RGB palette (cell_type() labels 0–6; must stay aligned with env rendering) ---
+_BLACK = (0, 0, 0)
+_WHITE = (255, 255, 255)
+_BROWN = (101, 67, 33)
+_GREY = (160, 161, 161)
+_GREEN = (31, 198, 0)
+_RED = (255, 0, 0)
+_LIGHT_RED = (255, 127, 127)
+
+# --- Observation layout — modes 3 & 5 (patch size, FOV sim, vector length) ---
+PATCH_RADIUS = 3  # 7×7 local patch around the agent
+LOCAL_PATCH_NUM_CELLS = (2 * PATCH_RADIUS + 1) ** 2
+OBS3_DIM = LOCAL_PATCH_NUM_CELLS + 10  # patch + 5 globals + 5 action-safety flags
+
+FOV_DISTANCE_PRED = 4
+MAX_ENEMIES_PRED = 8
+_OBS5_EXTRA_HEAD = 5  # seen_now, in_next, in_2, n_enemies_norm, bfs_dist_norm
+_OBS5_EXTRA_ACTION = 10  # 5 actions × (safe @ +1 rot, safe @ +2 rot)
+_OBS5_SLOT = 7  # row, col, orient one-hot×4, dist to agent
+OBS5_DIM = OBS3_DIM + _OBS5_EXTRA_HEAD + _OBS5_EXTRA_ACTION + MAX_ENEMIES_PRED * _OBS5_SLOT
+
+# --- Module-level mutable state (cross-step; resets handled inside observation() / reward()) ---
+_CURR_NEAREST_UNEXPLORED_DIST = 20.0
+_GRID_SNAPSHOT_FOR_REWARD: np.ndarray | None = None  # set in observation(); BFS shaping in reward 4
 _LAST_AGENT_POS = None
+_LAST_STEPS_REMAINING = None
+_NEXT_FOV_CELLS: set = set()  # FOV two rotations ahead (timing vs observation())
+_NO_PROGRESS_STREAK = 0
 _PREV_AGENT_POS = None
+_PREV_BFS_DIST: float | None = None
+_PREV_SAFE_FRONTIER_DIST = None
+_RECENT_POSITIONS: list = []
+_RECENT_WINDOW = 14
+_REWARD4_EPISODE_VISITED: set[int] = set()
+_STEPS_SINCE_DISCOVERY = 0
 _STILL_COUNT = 0
 _TWO_STEP_LOOP_COUNT = 0
-_LAST_STEPS_REMAINING = None
-_PREV_SAFE_FRONTIER_DIST = None
-_CURR_NEAREST_UNEXPLORED_DIST = 20.0
-_VISITED_POSITIONS = set()
-_NO_PROGRESS_STREAK = 0
-_WALL_CELLS = set()
-_RECENT_POSITIONS = []
-_RECENT_WINDOW = 14
-_STEPS_SINCE_DISCOVERY = 0  # steps elapsed since the last new cell was covered
-_NEXT_FOV_CELLS: set = set()  # enemy FOV 2 rotations ahead (= 1 step ahead by the time obs reads it)
-# Post-step grid copy for reward_func 4 BFS shaping (set in observation() each step).
-_GRID_SNAPSHOT_FOR_REWARD: np.ndarray | None = None
-# Previous BFS shortest-path distance to nearest unexplored (reward_func 4); reset each episode.
-_PREV_BFS_DIST: float | None = None
+_VISITED_POSITIONS: set = set()
+_WALL_CELLS: set = set()
 
-# reward_func == 4: potential-based-style shaping toward walkable frontier (clip per step).
-REWARD4_BFS_ALPHA = 0.35
-REWARD4_BFS_SHAPING_CAP = 1.5
-# Extra exploration when the agent is stuck at partial coverage (e.g. ~0.7 with no full clear).
-_REWARD4_EPISODE_VISITED: set[int] = set()  # distinct grid positions visited this episode
-REWARD4_FIRST_VISIT_BONUS = 0.18  # once per agent_pos per episode → spread paths, break loops
-REWARD4_FRONTIER_ADJ_BONUS = 0.07  # per step while orthogonally adjacent to BLACK/RED (unexplored)
-# Below this coverage ratio, new cells get +REWARD4_LOW_COVERAGE_NEWCELL_EXTRA.  Using ~0.72
-# matched an early design point but matched a policy plateau (~0.72 on chokepoint): the bonus
-# vanished right when the last corridor cells are hardest.  Keep high so endgame still pays.
-REWARD4_LOW_COVERAGE_THRESHOLD = 0.90
-REWARD4_LOW_COVERAGE_NEWCELL_EXTRA = 2.5  # on top of +5 when coverage below threshold
-REWARD4_EXPLORE_BOOST_COVER_MAX = 0.88  # scale BFS shaping while coverage is below this
-REWARD4_EXPLORE_BOOST_BFS = 1.25  # multiplicative boost to BFS alpha when coverage is low (up to 1+this)
-# Danger: stronger signal so exploration shaping does not drown "do not enter the cone"
-REWARD4_IMMEDIATE_DANGER_PENALTY = 36.0
+# --- REWARD_MODE == 4 — danger / game-over ---
 REWARD4_CURRENTLY_SEEN_PENALTY = 14.0
 REWARD4_GAME_OVER_PENALTY = -88.0
-# Terminal coverage bonus: added at episode end (death or timeout) so that
-# dying at 75% coverage is better than dying at 55%.  Without this the agent
-# converges to a safe-but-limited corridor and never attempts harder sections.
-REWARD4_TERMINAL_COVERAGE_BONUS = 120.0  # multiplied by coverage_ratio at termination
-# When next enemy rotation would sweep the agent's tile, scale down the big new-cell
-# bonuses (+5 / low-cov / unseen) so a reckless new tile cannot outweigh the hazard signal.
-REWARD4_NEWCELL_DANGER_SCALE = 0.32
-# While in enemy FOV or about to enter next-step FOV, scale down auxiliary explore bonuses
-REWARD4_UNSAFE_EXPLORE_SCALE = 0.12
-# Many-enemy maps (e.g. sneaky_enemies): next-step FOV is often true; use milder suppression
+REWARD4_IMMEDIATE_DANGER_PENALTY = 36.0
+REWARD4_TERMINAL_COVERAGE_BONUS = 120.0  # × coverage_ratio when episode ends on death/timeout
+
+# --- REWARD_MODE == 4 — new-cell & coverage shaping ---
+REWARD4_LOW_COVERAGE_NEWCELL_EXTRA = 2.5  # stacked on +5 when coverage below threshold
+REWARD4_LOW_COVERAGE_THRESHOLD = 0.90
+REWARD4_NEWCELL_DANGER_SCALE = 0.32  # scale +new-cell when next rotation would hit agent tile
+
+# --- REWARD_MODE == 4 — BFS / walkable frontier potential ---
+REWARD4_BFS_ALPHA = 0.35
+REWARD4_BFS_SHAPING_CAP = 1.5
+REWARD4_EXPLORE_BOOST_BFS = 1.25
+REWARD4_EXPLORE_BOOST_COVER_MAX = 0.88
+
+# --- REWARD_MODE == 4 — path diversity & frontier adjacency ---
+REWARD4_FIRST_VISIT_BONUS = 0.18
+REWARD4_FRONTIER_ADJ_BONUS = 0.07
+
+# --- REWARD_MODE == 4 — unsafe / dense-enemy scaling ---
 REWARD4_MANY_ENEMIES_THRESHOLD = 5
+REWARD4_UNSAFE_EXPLORE_SCALE = 0.12
 REWARD4_UNSAFE_EXPLORE_SCALE_DENSE = 0.38
-# Clip dense per-step return (before +200 victory) so critic scale stays stable
-REWARD4_STEP_CLIP_MIN = -62.0
+
+# --- REWARD_MODE == 4 — per-step return clip (victory +200 applied after) ---
 REWARD4_STEP_CLIP_MAX = 24.0
+REWARD4_STEP_CLIP_MIN = -62.0
 
 
-
-#Helper function to get the type of the cell
+# Helper function to get the type of the cell
 def cell_type(rgb: np.ndarray) -> int:
     """Map an RGB triple to a compact integer cell-type label (0-6)."""
     rgb = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
@@ -257,12 +257,7 @@ def _grid_metrics(grid: np.ndarray):
     }
 
 
-# OBSERVATION SPACE 3 — Local patch + global metrics
-PATCH_RADIUS = 3  # 7x7 patch around the agent
-LOCAL_PATCH_NUM_CELLS = (2 * PATCH_RADIUS + 1) ** 2
-# patch (49) + 5 globals + 5 action-safety flags (grid-inferred, no phase delay)
-OBS3_DIM = LOCAL_PATCH_NUM_CELLS + 10
-
+# OBSERVATION SPACE 3 — Local patch + global metrics (PATCH_RADIUS, OBS3_DIM: see module header)
 
 def obs_space_local_patch(env: gym.Env) -> gym.spaces.Space:
     return gym.spaces.Box(low=0.0, high=1.0, shape=(OBS3_DIM,), dtype=np.float32)
@@ -452,16 +447,7 @@ def obs_frontier_risk(grid: np.ndarray) -> np.ndarray:
     return feature_vec
 
 
-# --- OBSERVATION SPACE 5 — Fork of mode 3 + explicit enemy FOV prediction tail ---
-# Prefix is exactly obs_local_patch (OBS3_DIM). Suffix adds inferred-orientation FOV
-# after 1 and 2 global rotations, per-action lookahead vs those unions, and enemy slots.
-FOV_DISTANCE_PRED = 4
-MAX_ENEMIES_PRED = 8
-_OBS5_EXTRA_HEAD = 5  # seen_now, in_next, in_2, n_enemies_norm, bfs_dist_norm
-_OBS5_EXTRA_ACTION = 10  # 5 actions × (safe @ +1 rot, safe @ +2 rot)
-_OBS5_SLOT = 7  # row, col, orient one-hot×4, dist_to agent
-OBS5_DIM = OBS3_DIM + _OBS5_EXTRA_HEAD + _OBS5_EXTRA_ACTION + MAX_ENEMIES_PRED * _OBS5_SLOT
-
+# --- OBSERVATION SPACE 5 — mode 3 prefix + predictive FOV tail (dims: see module header) ---
 
 def _simulated_fov_cells(
     ey: int,
